@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GoalVault dApp</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"></script>
+  <style>
+    .bar { height:14px; background:#0f172a; border-radius:8px; overflow:hidden; margin:8px 0; }
+    #barFill { height:100%; width:0; background:var(--accent); transition:width .4s; }
+  </style>
+</head>
+<body>
+  <header>
+    <img alt="Vault logo" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%2322c55e'/><circle cx='32' cy='32' r='15' fill='none' stroke='%2304210f' stroke-width='5'/><circle cx='32' cy='32' r='4' fill='%2304210f'/></svg>">
+    <div>
+      <h1>GoalVault</h1>
+      <p class="muted">A savings vault on Sepolia. Money stays locked until you hit your goal.</p>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>1. Wallet</h2>
+      <button id="connectBtn">Connect MetaMask</button>
+      <p id="status" class="muted">Not connected.</p>
+    </section>
+
+    <section class="card">
+      <h2>2. Your vault (read)</h2>
+      <ul>
+        <li>Saved: <b id="balance">-</b> ETH</li>
+        <li>Goal: <b id="goal">-</b> ETH</li>
+        <li>Can withdraw: <b id="canWithdraw">-</b></li>
+        <li>Total locked in contract: <b id="total">-</b> ETH</li>
+      </ul>
+      <div class="bar"><div id="barFill"></div></div>
+      <button id="refreshBtn" disabled>Refresh</button>
+    </section>
+
+    <section class="card">
+      <h2>3. Set goal (write)</h2>
+      <input id="goalInput" type="number" step="0.0001" placeholder="Goal in ETH e.g. 0.01">
+      <button id="goalBtn" disabled>Set goal</button>
+    </section>
+
+    <section class="card">
+      <h2>4. Deposit &amp; withdraw (write)</h2>
+      <input id="depInput" type="number" step="0.0001" placeholder="Amount in ETH">
+      <button id="depBtn" disabled>Deposit</button>
+      <button id="wdBtn" disabled>Withdraw all</button>
+      <p class="muted">Withdraw only works once saved &ge; goal.</p>
+    </section>
+
+    <section class="card">
+      <h2>Transaction result</h2>
+      <p id="txResult" class="muted">No transaction yet.</p>
+    </section>
+  </main>
+
+  <footer class="muted">
+    <p>Contract: <a id="contractLink" href="#" target="_blank" rel="noopener">not set</a> ·
+       <a href="https://sepolia.etherscan.io" target="_blank" rel="noopener">Sepolia Etherscan</a></p>
+  </footer>
+
+  <script>
+    // >>> PASTE YOUR DEPLOYED SEPOLIA CONTRACT ADDRESS HERE <<<
+    const CONTRACT_ADDRESS = "0x145d0d1124c835016327278675fC3cc83e8F79DB";
+    const SEPOLIA_CHAIN_ID = 11155111n;
+    const ABI = [
+      "function setGoal(uint256 goalWei)",
+      "function deposit() payable",
+      "function withdraw()",
+      "function getVault(address user) view returns (uint256 balance, uint256 goal, bool canWithdraw)",
+      "function totalLocked() view returns (uint256)"
+    ];
+    let provider, signer, contract, account;
+    const $ = (id) => document.getElementById(id);
+    const fmt = (w) => Number(ethers.formatEther(w)).toString();
+
+    function setStatus(m, c = "muted") { $("status").className = c; $("status").textContent = m; }
+    function setTx(h, c = "muted") { $("txResult").className = c; $("txResult").innerHTML = h; }
+    function setButtons(on) { ["refreshBtn","goalBtn","depBtn","wdBtn"].forEach(i => $(i).disabled = !on); }
+
+    $("contractLink").textContent = CONTRACT_ADDRESS;
+    $("contractLink").href = "https://sepolia.etherscan.io/address/" + CONTRACT_ADDRESS;
+
+    async function connect() {
+      if (!window.ethereum) { setStatus("MetaMask not found. Please install it.", "err"); return; }
+      try {
+        provider = new ethers.BrowserProvider(window.ethereum);
+        await provider.send("eth_requestAccounts", []);
+        if ((await provider.getNetwork()).chainId !== SEPOLIA_CHAIN_ID) {
+          await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0xaa36a7" }] });
+          provider = new ethers.BrowserProvider(window.ethereum);
+        }
+        signer = await provider.getSigner();
+        account = await signer.getAddress();
+        contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
+        setStatus("Connected: " + account + " (Sepolia)", "ok");
+        setButtons(true);
+        refresh();
+      } catch (e) { setStatus("Connection failed: " + (e.shortMessage || e.message), "err"); }
+    }
+
+    async function refresh() {
+      try {
+        const [bal, goal, can] = await contract.getVault(account);
+        $("balance").textContent = fmt(bal);
+        $("goal").textContent = fmt(goal);
+        $("canWithdraw").textContent = can ? "Yes" : "No";
+        $("total").textContent = fmt(await contract.totalLocked());
+        $("barFill").style.width = goal > 0n ? Math.min(100, Number(bal * 100n / goal)) + "%" : "0%";
+      } catch (e) { setTx("Read failed: " + (e.reason || e.shortMessage || e.message), "err"); }
+    }
+
+    async function sendTx(label, fn) {
+      try {
+        setTx(label + ": waiting for MetaMask confirmation...");
+        const tx = await fn();
+        const link = "<a target='_blank' rel='noopener' href='https://sepolia.etherscan.io/tx/" + tx.hash + "'>" + tx.hash + "</a>";
+        setTx(label + ": pending... " + link);
+        const r = await tx.wait();
+        setTx(label + " confirmed in block " + r.blockNumber + ". Tx: " + link, "ok");
+        refresh();
+      } catch (e) { setTx(label + " failed: " + (e.reason || e.shortMessage || e.message), "err"); }
+    }
+
+    $("connectBtn").onclick = connect;
+    $("refreshBtn").onclick = refresh;
+    $("goalBtn").onclick = () => sendTx("Set goal", () => contract.setGoal(ethers.parseEther($("goalInput").value || "0")));
+    $("depBtn").onclick = () => sendTx("Deposit", () => contract.deposit({ value: ethers.parseEther($("depInput").value || "0") }));
+    $("wdBtn").onclick = () => sendTx("Withdraw", () => contract.withdraw());
+    if (window.ethereum) window.ethereum.on("chainChanged", () => location.reload());
+  </script>
+</body>
+</html>
